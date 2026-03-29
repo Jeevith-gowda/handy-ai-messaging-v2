@@ -1,0 +1,42 @@
+# Handy It Out — Cursor Rules
+
+## Project
+Handyman service management platform called "Handy It Out". Next.js 14 App Router, MongoDB Atlas, Tailwind CSS, Groq AI, OpenPhone.
+
+## Critical Rules
+- JavaScript ONLY. No TypeScript. Use .js and .jsx file extensions.
+- AI provider is GROQ (groq.com), NOT Grok (xAI). API URL: https://api.groq.com/openai/v1/chat/completions. Model: llama-3.3-70b-versatile. Env var: GROQ_API_KEY.
+- Use 'use client' only on interactive components (forms, filters, modals, anything with useState/useEffect).
+- Always populate Mongoose refs (customerId, handymanId) in GET queries.
+- Cache MongoDB connection globally in lib/db.js (Vercel serverless requirement).
+- Handyman portal must be mobile-first design.
+- Normalize phone numbers before customer lookup (strip +1, spaces, dashes, parentheses).
+- Hash passwords with bcryptjs (12 salt rounds) via Mongoose pre-save hook.
+- NextAuth uses JWT strategy with role and id in session via callbacks.
+- All admin API routes must check requireAuth() or requireAdmin().
+- The webhook endpoint (/api/webhooks/openphone) does NOT require auth.
+
+## Tech Stack
+- Next.js 14 (App Router)
+- MongoDB Atlas + Mongoose
+- NextAuth.js (CredentialsProvider, JWT)
+- Tailwind CSS
+- Groq API (llama-3.3-70b-versatile)
+- OpenPhone API + Webhooks
+- bcryptjs for passwords
+- Deployed on Vercel
+
+## File Structure Convention
+- Models in /models (PascalCase: User.js, Customer.js, Project.js, Message.js, Quote.js)
+- Utilities in /lib (db.js, ai.js, openphone.js, auth.js, messageHandler.js)
+- Shared components in /components
+- Admin pages under /app/admin/
+- Handyman pages under /app/handyman/
+- API routes under /app/api/
+
+## Status Enums
+- Project: inquiry → quoted → accepted → in_progress → completed → paid
+- Message: pending_review → approved → sent → failed → skipped
+- Quote: draft → sent → accepted → rejected → revised
+- User availability: available | busy | off
+- User role: admin | handyman

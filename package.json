@@ -1,0 +1,31 @@
+{
+  "name": "handy-it-out",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "seed": "node scripts/seed.js",
+    "seed:projects": "node scripts/seed-projects.js",
+    "ngrok": "ngrok http 3000"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.9.0",
+    "dotenv": "^17.3.1",
+    "mongoose": "^8.9.5",
+    "next": "14.2.21",
+    "next-auth": "^4.24.11",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.21",
+    "ngrok": "^5.0.0-beta.2",
+    "tailwindcss": "^4.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Legacy JS config (Tailwind v4): wires `content` globs for class detection */
+@config "../tailwind.config.js";
+
+/* Explicit sources — ensures App Router + components are scanned if auto-detect fails */
+@source "./";
+@source "../components/";
+
+/* PWA / notched devices — safe areas */
+@layer base {
+  html {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+}
