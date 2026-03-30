@@ -7,8 +7,14 @@ import Link from 'next/link';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  
+  // Pre-fill credentials if we're in local development, leave blank for production natively!
+  const isDev = process.env.NODE_ENV === 'development';
+  const initialEmail = isDev ? 'admin@handy.com' : '';
+  const initialPassword = isDev ? 'Admin123!' : '';
+
+  const [email, setEmail] = useState(initialEmail);
+  const [password, setPassword] = useState(initialPassword);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
