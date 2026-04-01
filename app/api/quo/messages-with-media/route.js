@@ -28,56 +28,32 @@ export async function GET(request) {
     const apiData = await quoFetch(`/messages?${params.toString()}`);
 
     // 3. Enrich each message with media from our webhook MongoDB collection
-    const messageIds = apiData.data.map(m => m.id);
-    const webhookDocs = await WebhookMessage.find({
-      quoMessageId: { $in: messageIds }
-    }).lean();
+    const apiMessages = (apiData.data || []).filter((msg) => !msg?.deletedAt);
+    const messageIds = apiMessages.map((message) => String(message?.id || '')).filter(Boolean);
+    const messageIdSet = new Set(messageIds);
+    const webhookDocs = messageIds.length > 0
+      ? await WebhookMessage.find({
+        quoMessageId: { $in: messageIds },
+      }).lean()
+      : [];
 
     const mediaMap = {};
     webhookDocs.forEach(doc => {
+      if (!messageIdSet.has(String(doc?.quoMessageId || ''))) {
+        return;
+      }
       if (doc.media && doc.media.length > 0) {
         mediaMap[doc.quoMessageId] = doc.media;
       }
     });
 
-    const enrichedMessages = apiData.data.map(msg => ({
+    const enrichedMessages = apiMessages.map((msg) => ({
       ...msg,
       body: msg.body || msg.text || '',
       text: msg.text || msg.body || '',
       media: mediaMap[msg.id] || msg.media || msg.attachments || [],
       _source: 'api',
     }));
-
-    // 4. Find webhook-only messages (MMS that REST API didn't return)
-    if (phoneNumberId && participants.length > 0) {
-      const participantNum = participants[0];
-      const existingIds = enrichedMessages.map(m => m.id);
-
-      const webhookOnly = await WebhookMessage.find({
-        phoneNumberId,
-        $or: [{ fromNumber: participantNum }, { toNumber: participantNum }],
-        quoMessageId: { $nin: existingIds },
-      }).sort({ quoCreatedAt: 1 }).lean();
-
-      webhookOnly.forEach(wm => {
-        enrichedMessages.push({
-          id: wm.quoMessageId,
-          from: wm.fromNumber,
-          to: [wm.toNumber],
-          body: wm.body,
-          text: wm.body,
-          phoneNumberId: wm.phoneNumberId,
-          direction: wm.direction,
-          userId: wm.userId,
-          status: wm.status,
-          createdAt: wm.quoCreatedAt,
-          media: wm.media || [],
-          _source: 'webhook',
-        });
-      });
-
-      enrichedMessages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-    }
 
     return NextResponse.json({
       data: enrichedMessages,

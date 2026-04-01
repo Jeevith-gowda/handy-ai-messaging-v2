@@ -1,5 +1,11 @@
 import { quoFetch } from '@/lib/quo-fetch';
 import { NextResponse } from 'next/server';
+import dbConnect from '@/lib/db';
+import DeletedConversation from '@/models/DeletedConversation';
+import { cleanupWebhookMedia } from '@/lib/webhookMediaCleanup';
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET(request) {
   try {
@@ -18,8 +24,20 @@ export async function GET(request) {
 
     const list = Array.isArray(data?.data) ? data.data : [];
 
+    // Tombstones from webhook conversation.deleted events.
+    let deletedIds = new Set();
+    try {
+      await dbConnect();
+      const deletedDocs = await DeletedConversation.find({}, { conversationId: 1 }).lean();
+      deletedIds = new Set(deletedDocs.map((doc) => String(doc.conversationId)));
+    } catch {
+      // If DB is unavailable, still return Quo-filtered results.
+    }
+
     // Keep only active conversations.
-    const active = list.filter((conversation) => !conversation?.deletedAt);
+    const active = list.filter(
+      (conversation) => !conversation?.deletedAt && !deletedIds.has(String(conversation?.id)),
+    );
 
     // Deduplicate by primary participant number, keeping the most recent by lastActivityAt.
     const byParticipant = new Map();
@@ -45,11 +63,24 @@ export async function GET(request) {
         new Date(a?.lastActivityAt || a?.updatedAt || 0).getTime(),
     );
 
-    return NextResponse.json({
-      ...data,
-      data: deduped,
-      totalItems: deduped.length,
+    await cleanupWebhookMedia({
+      activeConversationIds: deduped.map((conversation) => conversation?.id).filter(Boolean),
     });
+
+    return NextResponse.json(
+      {
+        ...data,
+        data: deduped,
+        totalItems: deduped.length,
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store, max-age=0, must-revalidate',
+          Pragma: 'no-cache',
+          Expires: '0',
+        },
+      },
+    );
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: err.status || 500 });
   }

@@ -543,6 +543,7 @@ export default function AIMessagingCommandCenter() {
   const [phoneNumbers, setPhoneNumbers] = useState([]);
 
   const [selectedConversation, setSelectedConversation] = useState(null);
+  const [deletedConversationNotice, setDeletedConversationNotice] = useState('');
   const [timeline, setTimeline] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [lastPollTime, setLastPollTime] = useState(() => new Date());
@@ -560,9 +561,12 @@ export default function AIMessagingCommandCenter() {
 
   // New state for action icons
   const [unreadConversations, setUnreadConversations] = useState(new Set());
+  const [openedConversations, setOpenedConversations] = useState(new Set());
+  const [clearedConversations, setClearedConversations] = useState(new Set());
   const [archivedConversations, setArchivedConversations] = useState(new Set());
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [conversationPreviewById, setConversationPreviewById] = useState({});
 
   // New state for new conversation input
   const [showNewConversationInput, setShowNewConversationInput] = useState(false);
@@ -595,6 +599,8 @@ export default function AIMessagingCommandCenter() {
   const messagesEndRef = useRef(null);
   const attachmentInputRef = useRef(null);
   const emojiPickerRef = useRef(null);
+  const conversationsRef = useRef([]);
+  const openedConversationsRef = useRef(new Set());
 
   const loadInitial = useCallback(async () => {
     try {
@@ -615,8 +621,15 @@ export default function AIMessagingCommandCenter() {
 
       const list = conversationRes?.data || [];
       setConversations(list);
+      setDeletedConversationNotice('');
       setNextPageToken(conversationRes?.nextPageToken || '');
       setPhoneNumbers(phoneRes?.data || []);
+
+      await cleanupWebhookMedia({
+        activeConversationIds: list.map((conversation) => conversation?.id).filter(Boolean),
+      });
+
+      await hydrateConversationPreviews(list, { markUnread: true });
 
       if (list.length > 0) {
         setSelectedConversation(list[0]);
@@ -631,6 +644,35 @@ export default function AIMessagingCommandCenter() {
   useEffect(() => {
     lastPollTimeRef.current = lastPollTime;
   }, [lastPollTime]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    openedConversationsRef.current = openedConversations;
+  }, [openedConversations]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('clearedConversations');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setClearedConversations(new Set(parsed.map(String)));
+      }
+    } catch {
+      // Ignore localStorage parse issues.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('clearedConversations', JSON.stringify(Array.from(clearedConversations)));
+    } catch {
+      // Ignore localStorage write issues.
+    }
+  }, [clearedConversations]);
 
   const updateConversationList = useCallback((incomingConversations = []) => {
     if (!Array.isArray(incomingConversations) || incomingConversations.length === 0) return;
@@ -660,9 +702,204 @@ export default function AIMessagingCommandCenter() {
     });
   }, []);
 
+  const replaceConversationList = useCallback((incomingConversations = []) => {
+    const sorted = (Array.isArray(incomingConversations) ? incomingConversations : []).sort(
+      (a, b) => toTime(b?.lastActivityAt || b?.updatedAt) - toTime(a?.lastActivityAt || a?.updatedAt),
+    );
+    setConversations(sorted);
+  }, []);
+
+  const cleanupWebhookMedia = useCallback(async ({ activeConversationIds = [], conversations = [] } = {}) => {
+    const hasActiveIds = Array.isArray(activeConversationIds) && activeConversationIds.length > 0;
+    const hasConversations = Array.isArray(conversations) && conversations.length > 0;
+    if (!hasActiveIds && !hasConversations) return;
+
+    try {
+      await fetch('/api/quo/webhooks/cleanup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ activeConversationIds, conversations }),
+      });
+    } catch (err) {
+      console.warn('Failed to clean webhook media:', err);
+    }
+  }, []);
+
   useEffect(() => {
     loadInitial();
   }, [loadInitial]);
+
+  const fetchLatestConversationActivity = useCallback(async (conversation) => {
+    const phoneNumberId = conversation?.phoneNumberId;
+    const participant = conversation?.participants?.[0];
+    const lastActivityId = String(conversation?.lastActivityId || '');
+    const lastActivityType = String(conversation?.lastActivityType || '').toLowerCase();
+    if (!phoneNumberId || !participant) {
+      return {
+        type: 'none',
+        text: 'No messages yet',
+        direction: '',
+        isPlaceholder: true,
+        isMissedCall: false,
+        createdAt: conversation?.lastActivityAt || '',
+      };
+    }
+
+    const [messagesRes, callsRes] = await Promise.all([
+      quoAPI.getMessages(phoneNumberId, [participant], { maxResults: '25' }).catch(() => ({ data: [] })),
+      quoAPI.getCalls(phoneNumberId, [participant], { maxResults: '25' }).catch(() => ({ data: [] })),
+    ]);
+
+    const messages = Array.isArray(messagesRes?.data) ? messagesRes.data : [];
+    const calls = Array.isArray(callsRes?.data) ? callsRes.data : [];
+
+    const buildMessagePreview = (message) => {
+      const direction = String(message?.direction || '').toLowerCase();
+      const media = Array.isArray(message?.media) ? message.media : [];
+      const rawText = String(message?.text || message?.body || '').trim();
+
+      let previewText = rawText;
+      if (!previewText && media.length > 0) {
+        const firstType = String(media?.[0]?.type || media?.[0]?.mimeType || '').toLowerCase();
+        previewText = firstType.includes('video') ? '🎥 Video' : '📷 Image';
+      }
+      if (!previewText) {
+        previewText = 'No messages yet';
+      }
+
+      if (direction === 'outgoing') {
+        previewText = `You: ${previewText}`;
+      }
+
+      return {
+        type: 'message',
+        text: previewText,
+        direction,
+        isPlaceholder: previewText === 'No messages yet',
+        isMissedCall: false,
+        createdAt: message?.createdAt || message?.quoCreatedAt || conversation?.lastActivityAt || '',
+      };
+    };
+
+    const buildCallPreview = (call) => {
+      const direction = String(call?.direction || '').toLowerCase();
+      const status = String(call?.status || '').toLowerCase();
+      const duration = Number(call?.duration || 0);
+      const isMissed = status === 'missed' || (duration === 0 && direction === 'incoming');
+      const text = isMissed
+        ? '📞 Missed call'
+        : `📞 ${direction === 'incoming' ? 'Incoming' : 'Outgoing'} call · ${formatDuration(duration)}`;
+
+      return {
+        type: 'call',
+        text,
+        direction,
+        isPlaceholder: false,
+        isMissedCall: isMissed,
+        createdAt: call?.createdAt || call?.startedAt || conversation?.lastActivityAt || '',
+      };
+    };
+
+    const messageById = messages.find((message) => String(message?.id || '') === lastActivityId);
+    const callById = calls.find((call) => String(call?.id || call?.callId || '') === lastActivityId);
+
+    if (lastActivityType.includes('call') && callById) {
+      return buildCallPreview(callById);
+    }
+    if (lastActivityType.includes('message') && messageById) {
+      return buildMessagePreview(messageById);
+    }
+    if (callById) {
+      return buildCallPreview(callById);
+    }
+    if (messageById) {
+      return buildMessagePreview(messageById);
+    }
+
+    const latestMessage = messages
+      .slice()
+      .sort((a, b) => toTime(b?.createdAt || b?.quoCreatedAt) - toTime(a?.createdAt || a?.quoCreatedAt))[0] || null;
+    const latestCall = calls
+      .slice()
+      .sort((a, b) => toTime(b?.createdAt || b?.startedAt) - toTime(a?.createdAt || a?.startedAt))[0] || null;
+
+    const messageTs = toTime(latestMessage?.createdAt || latestMessage?.quoCreatedAt);
+    const callTs = toTime(latestCall?.createdAt || latestCall?.startedAt);
+
+    if (!latestMessage && !latestCall) {
+      return {
+        type: 'none',
+        text: 'No messages yet',
+        direction: '',
+        isPlaceholder: true,
+        isMissedCall: false,
+        createdAt: conversation?.lastActivityAt || '',
+      };
+    }
+
+    if (latestMessage && (!latestCall || messageTs >= callTs)) {
+      return buildMessagePreview(latestMessage);
+    }
+
+    return buildCallPreview(latestCall);
+  }, []);
+
+  const hydrateConversationPreviews = useCallback(
+    async (conversationList = [], options = {}) => {
+      const { markUnread = false } = options;
+      if (!Array.isArray(conversationList) || conversationList.length === 0) return;
+
+      const previewEntries = await Promise.all(
+        conversationList.map(async (conversation) => {
+          try {
+            if (clearedConversations.has(String(conversation.id))) {
+              return [conversation.id, {
+                type: 'none',
+                text: 'No messages yet',
+                direction: '',
+                isPlaceholder: true,
+                isMissedCall: false,
+                createdAt: conversation?.lastActivityAt || '',
+              }];
+            }
+            const preview = await fetchLatestConversationActivity(conversation);
+            return [conversation.id, preview];
+          } catch {
+            return [conversation.id, {
+              type: 'none',
+              text: 'No messages yet',
+              direction: '',
+              isPlaceholder: true,
+              isMissedCall: false,
+              createdAt: conversation?.lastActivityAt || '',
+            }];
+          }
+        }),
+      );
+
+      const previewMap = Object.fromEntries(previewEntries);
+      setConversationPreviewById((prev) => ({ ...prev, ...previewMap }));
+
+      if (markUnread) {
+        setUnreadConversations((prev) => {
+          const next = new Set(prev);
+          for (const conversation of conversationList) {
+            const preview = previewMap[conversation.id];
+            const isIncomingMessage = preview?.type === 'message' && isIncomingDirection(preview?.direction);
+            const isOpened = openedConversationsRef.current.has(conversation.id);
+            const isSelected = selectedConversation?.id === conversation.id;
+            if (isIncomingMessage && !isOpened && !isSelected) {
+              next.add(conversation.id);
+            }
+          }
+          return next;
+        });
+      }
+    },
+    [fetchLatestConversationActivity, selectedConversation?.id, clearedConversations],
+  );
 
   // Build Calls tab list from conversations whose last activity is a call.
   const loadCalls = useCallback(async () => {
@@ -723,6 +960,11 @@ export default function AIMessagingCommandCenter() {
         return;
       }
 
+      if (clearedConversations.has(String(conversation.id))) {
+        setTimeline([]);
+        return;
+      }
+
       const { phoneNumberId, participants = [] } = conversation;
       const participantList = Array.isArray(participants) ? participants.filter(Boolean) : [];
 
@@ -744,7 +986,7 @@ export default function AIMessagingCommandCenter() {
 
         const unifiedTimeline = [];
 
-        for (const msg of messagesRes?.data || []) {
+        for (const msg of (messagesRes?.data || []).filter((message) => !message?.deletedAt)) {
           unifiedTimeline.push({
             type: 'message',
             id: msg.id,
@@ -758,7 +1000,7 @@ export default function AIMessagingCommandCenter() {
           });
         }
 
-        for (const call of callsRes?.data || []) {
+        for (const call of (callsRes?.data || []).filter((entry) => !entry?.deletedAt)) {
           unifiedTimeline.push({
             type: 'call',
             id: call.id || call.callId,
@@ -782,7 +1024,7 @@ export default function AIMessagingCommandCenter() {
         }
       }
     },
-    [],
+    [clearedConversations],
   );
 
   useEffect(() => {
@@ -798,6 +1040,8 @@ export default function AIMessagingCommandCenter() {
     if (!selectedConversation?.id) return;
     const refreshed = conversations.find((conversation) => conversation.id === selectedConversation.id);
     if (!refreshed) {
+      setDeletedConversationNotice('This conversation has been deleted');
+      setTimeline([]);
       setSelectedConversation(null);
       return;
     }
@@ -809,6 +1053,7 @@ export default function AIMessagingCommandCenter() {
       refreshed.lastMessageAt !== selectedConversation.lastMessageAt;
 
     if (changed) {
+      setDeletedConversationNotice('');
       setSelectedConversation(refreshed);
     }
   }, [conversations, selectedConversation]);
@@ -821,14 +1066,41 @@ export default function AIMessagingCommandCenter() {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const pollFrom = lastPollTimeRef.current;
         const convos = await quoAPI.getConversations({
-          updatedAfter: pollFrom.toISOString(),
-          maxResults: '20',
+          maxResults: '50',
         });
 
-        if ((convos?.data || []).length > 0) {
-          updateConversationList(convos.data);
+        const freshList = Array.isArray(convos?.data) ? convos.data : [];
+        const existingById = new Map(conversationsRef.current.map((conversation) => [conversation.id, conversation]));
+        const freshIds = new Set(freshList.map((conversation) => String(conversation.id)));
+        const removedConversations = conversationsRef.current.filter(
+          (conversation) => conversation?.id && !freshIds.has(String(conversation.id)),
+        );
+
+        const changedConversations = freshList.filter((conversation) => {
+          const existing = existingById.get(conversation.id);
+          if (!existing) return true;
+          return (
+            existing.lastActivityAt !== conversation.lastActivityAt ||
+            existing.lastActivityId !== conversation.lastActivityId ||
+            existing.lastMessageAt !== conversation.lastMessageAt
+          );
+        });
+
+        if (changedConversations.length > 0) {
+          await hydrateConversationPreviews(changedConversations, { markUnread: true });
+        }
+
+        replaceConversationList(freshList);
+
+        if (removedConversations.length > 0) {
+          await cleanupWebhookMedia({ conversations: removedConversations });
+        }
+
+        if (selectedConversation?.id && !freshIds.has(String(selectedConversation.id))) {
+          setDeletedConversationNotice('This conversation has been deleted');
+          setTimeline([]);
+          setSelectedConversation(null);
         }
 
         if (selectedConversation) {
@@ -842,7 +1114,7 @@ export default function AIMessagingCommandCenter() {
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [selectedConversation, refreshCurrentConversation, updateConversationList]);
+  }, [selectedConversation, refreshCurrentConversation, replaceConversationList, hydrateConversationPreviews]);
 
   const handleLoadMore = useCallback(async () => {
     if (!nextPageToken) return;
@@ -1107,6 +1379,49 @@ export default function AIMessagingCommandCenter() {
     setShowMoreMenu(false);
   }, [selectedConversation]);
 
+  const handleClearChat = useCallback(() => {
+    if (!selectedConversation?.id) return;
+    const confirmed = window.confirm(
+      'Are you sure you want to clear this chat? This will only remove messages from your dashboard view, not from Quo.',
+    );
+    if (!confirmed) return;
+
+    const conversationId = String(selectedConversation.id);
+    setClearedConversations((prev) => {
+      const next = new Set(prev);
+      next.add(conversationId);
+      return next;
+    });
+    setTimeline([]);
+    setConversationPreviewById((prev) => ({
+      ...prev,
+      [conversationId]: {
+        type: 'none',
+        text: 'No messages yet',
+        direction: '',
+        isPlaceholder: true,
+        isMissedCall: false,
+        createdAt: selectedConversation?.lastActivityAt || '',
+      },
+    }));
+    setShowMoreMenu(false);
+    setComposerToast('Chat cleared locally.');
+  }, [selectedConversation]);
+
+  const handleRestoreChat = useCallback(async () => {
+    if (!selectedConversation?.id) return;
+    const conversationId = String(selectedConversation.id);
+    setClearedConversations((prev) => {
+      const next = new Set(prev);
+      next.delete(conversationId);
+      return next;
+    });
+    await hydrateConversationPreviews([selectedConversation], { markUnread: false });
+    await loadConversationDetail(selectedConversation, { silent: true });
+    setShowMoreMenu(false);
+    setComposerToast('Chat restored.');
+  }, [selectedConversation, hydrateConversationPreviews, loadConversationDetail]);
+
   // Handler for new conversation submission
   const handleNewConversationSubmit = useCallback(async () => {
     const formatted = formatToE164(newConversationPhone);
@@ -1162,15 +1477,17 @@ export default function AIMessagingCommandCenter() {
   const filteredConversations = useMemo(() => {
     return visibleConversations.filter((conversation) => {
       const participant = String(conversation?.participants?.[0] || '');
-      const lastDirection = String(conversation?.lastMessage?.direction || '').toLowerCase();
+      const preview = conversationPreviewById[conversation.id] || {};
+      const lastDirection = String(preview?.direction || '').toLowerCase();
+      const previewType = String(preview?.type || '');
       const activityTs = toTime(conversation?.lastActivityAt || conversation?.updatedAt);
       const deleted = Boolean(conversation?.deletedAt);
 
       if (chatOpenFilter === 'open' && deleted) return false;
       if (chatOpenFilter === 'closed' && !deleted) return false;
 
-      if (chatQuickFilter === 'unread' && lastDirection !== 'incoming') return false;
-      if (chatQuickFilter === 'unresponded' && lastDirection !== 'incoming') return false;
+      if (chatQuickFilter === 'unread' && !unreadConversations.has(conversation.id)) return false;
+      if (chatQuickFilter === 'unresponded' && !(previewType === 'message' && lastDirection === 'incoming')) return false;
 
       if (chatPhoneSearch && !participant.includes(chatPhoneSearch.trim())) return false;
 
@@ -1186,7 +1503,16 @@ export default function AIMessagingCommandCenter() {
 
       return true;
     });
-  }, [visibleConversations, chatOpenFilter, chatQuickFilter, chatPhoneSearch, chatDateFrom, chatDateTo]);
+  }, [
+    visibleConversations,
+    conversationPreviewById,
+    unreadConversations,
+    chatOpenFilter,
+    chatQuickFilter,
+    chatPhoneSearch,
+    chatDateFrom,
+    chatDateTo,
+  ]);
 
   const filteredCalls = useMemo(() => {
     return callsList.filter((call) => {
@@ -1500,12 +1826,34 @@ export default function AIMessagingCommandCenter() {
                       const contactName = getContactName(participant);
                       const active = selectedConversation?.id === conversation.id;
                       const isUnread = unreadConversations.has(conversation.id);
+                      const preview = conversationPreviewById[conversation.id];
+                      const previewText = preview?.text || getConversationListPreview(conversation);
+                      const previewClass = preview?.isMissedCall
+                        ? 'mt-1 truncate text-sm text-red-600'
+                        : preview?.isPlaceholder
+                          ? 'mt-1 truncate text-sm italic text-gray-400'
+                          : isUnread
+                            ? 'mt-1 truncate text-sm font-semibold text-gray-900'
+                            : 'mt-1 truncate text-sm text-gray-500';
 
                       return (
                         <li key={conversation.id}>
                           <button
                             type="button"
-                            onClick={() => setSelectedConversation(conversation)}
+                            onClick={() => {
+                              setDeletedConversationNotice('');
+                              setSelectedConversation(conversation);
+                              setOpenedConversations((prev) => {
+                                const next = new Set(prev);
+                                next.add(conversation.id);
+                                return next;
+                              });
+                              setUnreadConversations((prev) => {
+                                const next = new Set(prev);
+                                next.delete(conversation.id);
+                                return next;
+                              });
+                            }}
                             className={`w-full border-b border-gray-100 px-4 py-3 text-left transition ${
                               active ? 'bg-indigo-50' : 'bg-white hover:bg-gray-50'
                             }`}
@@ -1522,9 +1870,11 @@ export default function AIMessagingCommandCenter() {
                                   <p className={`truncate text-sm ${isUnread ? 'font-bold text-gray-900' : 'font-semibold text-gray-900'}`}>
                                     {contactName || participant}
                                   </p>
-                                  <span className="shrink-0 text-xs text-gray-500">{formatTimestamp(conversation.lastMessageAt)}</span>
+                                  <span className="shrink-0 text-xs text-gray-500">
+                                    {formatTimestamp(preview?.createdAt || conversation.lastActivityAt || conversation.lastMessageAt)}
+                                  </span>
                                 </div>
-                                <p className="mt-1 truncate text-sm text-gray-500">{getConversationListPreview(conversation)}</p>
+                                <p className={previewClass}>{previewText}</p>
                               </div>
                             </div>
                           </button>
@@ -1556,6 +1906,12 @@ export default function AIMessagingCommandCenter() {
                       const contactName = getContactName(participant);
                       const active = selectedCallId === call.id;
                       const callEndedText = call.direction === 'incoming' ? '↙ Call ended' : '↗ Call ended';
+                      const direction = String(call?.direction || '').toLowerCase();
+                      const status = String(call?.status || '').toLowerCase();
+                      const duration = Number(call?.duration || 0);
+                      const isMissed = status === 'missed' || (direction === 'incoming' && duration === 0);
+                      const isVoicemail = hasVoicemail(call);
+                      const isAiHandled = Boolean(call?.aiHandled);
 
                       return (
                         <li key={call.id}>
@@ -1577,7 +1933,11 @@ export default function AIMessagingCommandCenter() {
                                   <div>
                                     <p className="text-sm font-semibold text-gray-900">{contactName || participant}</p>
                                     <div className="mt-0.5 flex items-center gap-2">
-                                      <p className="text-xs text-gray-500">{callEndedText}</p>
+                                      {isMissed ? <p className="text-xs text-red-600">📞 Missed</p> : null}
+                                      {!isMissed ? <p className="text-xs text-emerald-600">📞 {formatDuration(duration)}</p> : null}
+                                      {isVoicemail ? <p className="text-xs text-amber-700">📩 Voicemail</p> : null}
+                                      {isAiHandled ? <p className="text-xs text-indigo-700">🤖 Handled by Sona AI</p> : null}
+                                      {!isMissed && !isVoicemail && !isAiHandled ? <p className="text-xs text-gray-500">{callEndedText}</p> : null}
                                       <span className="h-5 w-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[9px] font-semibold">
                                         SU
                                       </span>
@@ -1677,6 +2037,23 @@ export default function AIMessagingCommandCenter() {
                     >
                       Copy phone number
                     </button>
+                    {clearedConversations.has(String(selectedConversation.id)) ? (
+                      <button
+                        type="button"
+                        onClick={handleRestoreChat}
+                        className="block w-full text-left px-4 py-2 text-sm text-emerald-700 hover:bg-emerald-50"
+                      >
+                        Restore chat
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleClearChat}
+                        className="block w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+                      >
+                        Clear chat
+                      </button>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -1697,6 +2074,11 @@ export default function AIMessagingCommandCenter() {
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {selectedTab === 'chats' ? (
             <div className="space-y-4">
+              {deletedConversationNotice ? (
+                <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  {deletedConversationNotice}
+                </p>
+              ) : null}
               {detailLoading ? (
                 <p className="text-sm text-gray-500">Loading timeline...</p>
               ) : !selectedConversation ? (
