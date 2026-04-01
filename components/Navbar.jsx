@@ -3,7 +3,7 @@
 import { signOut } from 'next-auth/react';
 import { useState } from 'react';
 
-export default function Navbar({ user, onMenuToggle, mobileMenuOpen = false }) {
+export default function Navbar({ user, onMenuToggle, mobileMenuOpen = false, pageTitle = '' }) {
   const [showDropdown, setShowDropdown] = useState(false);
 
   return (
@@ -28,7 +28,9 @@ export default function Navbar({ user, onMenuToggle, mobileMenuOpen = false }) {
               </svg>
             )}
           </button>
-          <h2 className="text-base md:text-lg font-semibold text-gray-900 md:hidden truncate">Handy It Out</h2>
+          <h2 className="text-base md:text-lg font-semibold text-gray-900 truncate">
+            {pageTitle || 'Handy It Out'}
+          </h2>
         </div>
 
         <div className="relative flex-shrink-0">

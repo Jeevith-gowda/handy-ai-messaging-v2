@@ -75,7 +75,12 @@ export default function AdminLayout({ children }) {
           sidebarDesktopExpanded ? 'md:pl-64' : 'md:pl-16'
         }`}
       >
-        <Navbar user={session?.user} onMenuToggle={() => setMobileMenuOpen((o) => !o)} mobileMenuOpen={mobileMenuOpen} />
+        <Navbar
+          user={session?.user}
+          onMenuToggle={() => setMobileMenuOpen((o) => !o)}
+          mobileMenuOpen={mobileMenuOpen}
+          pageTitle={isAIMessagingPage ? 'AI Messaging' : ''}
+        />
         <main
           className={
             isAIMessagingPage

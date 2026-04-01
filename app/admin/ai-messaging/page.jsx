@@ -15,6 +15,13 @@ const AVATAR_COLORS = [
   'bg-fuchsia-200 text-fuchsia-700',
 ];
 
+const BASIC_EMOJIS = [
+  '😀', '😁', '😂', '🤣', '😊', '😍', '😘', '😎',
+  '🤔', '😢', '😭', '😡', '👍', '👎', '👏', '🙏',
+  '🎉', '❤️', '🔥', '⭐', '✅', '❌', '💯', '📌',
+  '📞', '📩', '📅', '⏰', '💬', '🚀', '🏠', '🛠️',
+];
+
 function formatTimestamp(value) {
   if (!value) return '';
   const date = new Date(value);
@@ -82,6 +89,25 @@ function normalizeAttachmentType(type = '') {
   return `application/${type}`;
 }
 
+function isIncomingDirection(value) {
+  return String(value || '').toLowerCase() === 'incoming';
+}
+
+function hasVoicemail(call) {
+  return Boolean(
+    call?.voicemail ||
+      call?.voicemailUrl ||
+      call?.voicemailId ||
+      call?.hasVoicemail ||
+      call?.recordingType === 'voicemail',
+  );
+}
+
+function toTime(value) {
+  const ts = new Date(value || 0).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
 export function formatDuration(seconds) {
   const numeric = Number(seconds);
   if (!numeric || numeric <= 0) return '0s';
@@ -145,6 +171,62 @@ function PersonIconSmall() {
       >
         <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
       </svg>
+    </div>
+  );
+}
+
+function FilterDropdown({ value, options, onChange }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleClickOutside = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-sm"
+      >
+        <span>{selected.label}</span>
+        <svg className={`h-3 w-3 text-slate-300 transition-transform ${open ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.168l3.71-3.938a.75.75 0 1 1 1.08 1.04l-4.25 4.51a.75.75 0 0 1-1.08 0L5.21 8.27a.75.75 0 0 1 .02-1.06Z" clipRule="evenodd" />
+        </svg>
+      </button>
+
+      {open ? (
+        <div className="absolute left-0 top-full z-20 mt-2 min-w-48 rounded-2xl border border-slate-700 bg-slate-900 p-2 shadow-2xl">
+          {options.map((option) => {
+            const active = option.value === value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition ${
+                  active ? 'bg-slate-800 text-white' : 'text-slate-200 hover:bg-slate-800/80'
+                }`}
+              >
+                <span className="inline-flex w-4 items-center justify-center text-slate-300">{option.icon || ''}</span>
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -469,6 +551,12 @@ export default function AIMessagingCommandCenter() {
   const [composerText, setComposerText] = useState('');
   const [sending, setSending] = useState(false);
   const [composerToast, setComposerToast] = useState('');
+  const [composerDrafting, setComposerDrafting] = useState(false);
+  const [selectedAttachment, setSelectedAttachment] = useState(null);
+  const [scheduledAt, setScheduledAt] = useState('');
+  const [showSchedulePicker, setShowSchedulePicker] = useState(false);
+  const [scheduleDraftAt, setScheduleDraftAt] = useState('');
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   // New state for action icons
   const [unreadConversations, setUnreadConversations] = useState(new Set());
@@ -480,8 +568,33 @@ export default function AIMessagingCommandCenter() {
   const [showNewConversationInput, setShowNewConversationInput] = useState(false);
   const [newConversationPhone, setNewConversationPhone] = useState('');
 
+  // New state for Chats/Calls tabs
+  const [selectedTab, setSelectedTab] = useState('chats');
+  const [callsList, setCallsList] = useState([]);
+  const [selectedCallId, setSelectedCallId] = useState(null);
+  const [callsLoading, setCallsLoading] = useState(false);
+
+  // Chats tab filters
+  const [chatOpenFilter, setChatOpenFilter] = useState('open'); // open | closed | all
+  const [chatQuickFilter, setChatQuickFilter] = useState(''); // '' | unread | unresponded
+  const [showChatAdvancedFilters, setShowChatAdvancedFilters] = useState(false);
+  const [chatDateFrom, setChatDateFrom] = useState('');
+  const [chatDateTo, setChatDateTo] = useState('');
+  const [chatPhoneSearch, setChatPhoneSearch] = useState('');
+
+  // Calls tab filters
+  const [callOpenFilter, setCallOpenFilter] = useState('open'); // open | closed | all
+  const [callQuickFilter, setCallQuickFilter] = useState(''); // '' | missed | voicemail | unresponded
+  const [callDirectionFilter, setCallDirectionFilter] = useState('all'); // all | incoming | outgoing
+  const [showCallAdvancedFilters, setShowCallAdvancedFilters] = useState(false);
+  const [callDateFrom, setCallDateFrom] = useState('');
+  const [callDateTo, setCallDateTo] = useState('');
+  const [callPhoneSearch, setCallPhoneSearch] = useState('');
+
   // Ref for auto-scrolling to latest message
   const messagesEndRef = useRef(null);
+  const attachmentInputRef = useRef(null);
+  const emojiPickerRef = useRef(null);
 
   const loadInitial = useCallback(async () => {
     try {
@@ -551,8 +664,60 @@ export default function AIMessagingCommandCenter() {
     loadInitial();
   }, [loadInitial]);
 
+  // Build Calls tab list from conversations whose last activity is a call.
+  const loadCalls = useCallback(async () => {
+    try {
+      setCallsLoading(true);
+      const conversationRes = await quoAPI.getConversations({ maxResults: '50' });
+      const allConversations = Array.isArray(conversationRes?.data) ? conversationRes.data : [];
+
+      const callConversations = allConversations.filter((conversation) =>
+        String(conversation?.lastActivityId || '').toUpperCase().startsWith('AC'),
+      );
+
+      const callRows = await Promise.all(
+        callConversations.map(async (conversation) => {
+          const participant = conversation?.participants?.[0];
+          const phoneNumberId = conversation?.phoneNumberId;
+          if (!phoneNumberId || !participant) return null;
+
+          try {
+            const callRes = await quoAPI.getCalls(phoneNumberId, [participant], { maxResults: '20' });
+            const calls = Array.isArray(callRes?.data) ? callRes.data : [];
+            const activityCallId = String(conversation?.lastActivityId || '');
+            const matched = calls.find((call) => String(call?.id || call?.callId || '') === activityCallId) || calls[0];
+            if (!matched) return null;
+
+            return {
+              ...matched,
+              id: matched.id || matched.callId,
+              participant,
+              conversationId: conversation.id,
+              createdAt: matched.createdAt || matched.startedAt || conversation.lastActivityAt,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      const cleaned = callRows.filter(Boolean).sort(
+        (a, b) =>
+          new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
+      );
+
+      setCallsList(cleaned);
+    } catch (err) {
+      console.warn('Failed to load calls:', err);
+      setCallsList([]);
+    } finally {
+      setCallsLoading(false);
+    }
+  }, []);
+
   const loadConversationDetail = useCallback(
-    async (conversation) => {
+    async (conversation, options = {}) => {
+      const { silent = false } = options;
       if (!conversation) {
         setTimeline([]);
         return;
@@ -567,7 +732,9 @@ export default function AIMessagingCommandCenter() {
       }
 
       try {
-        setDetailLoading(true);
+        if (!silent) {
+          setDetailLoading(true);
+        }
 
         // Step 9.1: fetch messages and calls in parallel and build unified timeline.
         const [messagesRes, callsRes] = await Promise.all([
@@ -610,7 +777,9 @@ export default function AIMessagingCommandCenter() {
       } catch (err) {
         setError(err?.message || 'Failed to load conversation details');
       } finally {
-        setDetailLoading(false);
+        if (!silent) {
+          setDetailLoading(false);
+        }
       }
     },
     [],
@@ -628,14 +797,25 @@ export default function AIMessagingCommandCenter() {
   useEffect(() => {
     if (!selectedConversation?.id) return;
     const refreshed = conversations.find((conversation) => conversation.id === selectedConversation.id);
-    if (refreshed && refreshed !== selectedConversation) {
+    if (!refreshed) {
+      setSelectedConversation(null);
+      return;
+    }
+
+    // Update selected conversation only when key fields actually change.
+    const changed =
+      refreshed.lastActivityAt !== selectedConversation.lastActivityAt ||
+      refreshed.lastActivityId !== selectedConversation.lastActivityId ||
+      refreshed.lastMessageAt !== selectedConversation.lastMessageAt;
+
+    if (changed) {
       setSelectedConversation(refreshed);
     }
   }, [conversations, selectedConversation]);
 
   const refreshCurrentConversation = useCallback(async () => {
     if (!selectedConversation) return;
-    await loadConversationDetail(selectedConversation);
+    await loadConversationDetail(selectedConversation, { silent: true });
   }, [selectedConversation, loadConversationDetail]);
 
   useEffect(() => {
@@ -716,9 +896,11 @@ export default function AIMessagingCommandCenter() {
       setComposerToast('');
       setTimeline((prev) => [...prev, optimisticMessage].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)));
       setComposerText('');
+      setSelectedAttachment(null);
+      setScheduledAt('');
       await quoAPI.sendMessage(fromPhone, participant, text);
 
-      await loadConversationDetail(selectedConversation);
+      await loadConversationDetail(selectedConversation, { silent: true });
     } catch (err) {
       // Restore composer text and remove optimistic message on failure.
       setComposerText(previousText);
@@ -747,6 +929,110 @@ export default function AIMessagingCommandCenter() {
     const timer = setTimeout(() => setComposerToast(''), 4000);
     return () => clearTimeout(timer);
   }, [composerToast]);
+
+  useEffect(() => {
+    if (!showEmojiPicker) return undefined;
+
+    const handleOutsideClick = (event) => {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(event.target)) {
+        setShowEmojiPicker(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [showEmojiPicker]);
+
+  const handleSparkleDraft = useCallback(() => {
+    setComposerDrafting(true);
+    setComposerText((prev) => {
+      const base = String(prev || '').trim();
+      if (!base) {
+        return `Hi ${selectedName || 'there'}, just checking in on your request. Let me know if you need anything else.`;
+      }
+
+      const normalized = base.replace(/\s+/g, ' ').trim();
+      const capitalized = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+    });
+    setComposerDrafting(false);
+  }, [selectedName]);
+
+  const handleQuickEdit = useCallback(() => {
+    if (!composerText.trim()) {
+      setComposerToast('Type a message first to edit it.');
+      return;
+    }
+
+    setComposerText((prev) =>
+      prev
+        .replace(/\bu\b/gi, 'you')
+        .replace(/\bpls\b/gi, 'please')
+        .replace(/\bthx\b/gi, 'thanks')
+        .replace(/\bmsg\b/gi, 'message')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    );
+  }, [composerText]);
+
+  const handleAttachmentClick = useCallback(() => {
+    attachmentInputRef.current?.click();
+  }, []);
+
+  const handleAttachmentSelected = useCallback((event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setSelectedAttachment(file);
+    setComposerToast(`Attached: ${file.name}`);
+  }, []);
+
+  const handleEmojiToggle = useCallback(() => {
+    setShowEmojiPicker((prev) => !prev);
+  }, []);
+
+  const handleEmojiInsert = useCallback((emoji) => {
+    setComposerText((prev) => `${prev || ''}${prev ? ' ' : ''}${emoji}`);
+    setShowEmojiPicker(false);
+  }, []);
+
+  const handleTimerToggle = useCallback(() => {
+    if (!showSchedulePicker) {
+      const defaultTime = scheduledAt || new Date(Date.now() + 30 * 60 * 1000).toISOString().slice(0, 16);
+      setScheduleDraftAt(defaultTime);
+    }
+    setShowSchedulePicker((prev) => !prev);
+  }, [showSchedulePicker, scheduledAt]);
+
+  const handleApplySchedule = useCallback(() => {
+    if (!scheduleDraftAt) {
+      setComposerToast('Pick a date and time first.');
+      return;
+    }
+
+    const selected = new Date(scheduleDraftAt);
+    if (Number.isNaN(selected.getTime())) {
+      setComposerToast('Invalid date/time selected.');
+      return;
+    }
+
+    setScheduledAt(scheduleDraftAt);
+    setShowSchedulePicker(false);
+    setComposerToast(
+      `Scheduled for ${selected.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })}`,
+    );
+  }, [scheduleDraftAt]);
+
+  const handleClearSchedule = useCallback(() => {
+    setScheduledAt('');
+    setScheduleDraftAt('');
+    setShowSchedulePicker(false);
+    setComposerToast('Schedule cleared.');
+  }, []);
 
   // Handler for phone icon - open tel: link
   const handleCallClick = useCallback(() => {
@@ -873,122 +1159,451 @@ export default function AIMessagingCommandCenter() {
   // Filter out archived conversations
   const visibleConversations = conversations.filter((c) => !archivedConversations.has(c.id));
 
+  const filteredConversations = useMemo(() => {
+    return visibleConversations.filter((conversation) => {
+      const participant = String(conversation?.participants?.[0] || '');
+      const lastDirection = String(conversation?.lastMessage?.direction || '').toLowerCase();
+      const activityTs = toTime(conversation?.lastActivityAt || conversation?.updatedAt);
+      const deleted = Boolean(conversation?.deletedAt);
+
+      if (chatOpenFilter === 'open' && deleted) return false;
+      if (chatOpenFilter === 'closed' && !deleted) return false;
+
+      if (chatQuickFilter === 'unread' && lastDirection !== 'incoming') return false;
+      if (chatQuickFilter === 'unresponded' && lastDirection !== 'incoming') return false;
+
+      if (chatPhoneSearch && !participant.includes(chatPhoneSearch.trim())) return false;
+
+      if (chatDateFrom) {
+        const fromTs = toTime(`${chatDateFrom}T00:00:00`);
+        if (activityTs < fromTs) return false;
+      }
+
+      if (chatDateTo) {
+        const toTs = toTime(`${chatDateTo}T23:59:59`);
+        if (activityTs > toTs) return false;
+      }
+
+      return true;
+    });
+  }, [visibleConversations, chatOpenFilter, chatQuickFilter, chatPhoneSearch, chatDateFrom, chatDateTo]);
+
+  const filteredCalls = useMemo(() => {
+    return callsList.filter((call) => {
+      const participant = String(call?.participant || call?.source?.phoneNumber || call?.from || '');
+      const direction = String(call?.direction || '').toLowerCase();
+      const status = String(call?.status || '').toLowerCase();
+      const callTs = toTime(call?.createdAt || call?.startedAt);
+      const deleted = Boolean(call?.deletedAt);
+
+      if (callOpenFilter === 'open' && deleted) return false;
+      if (callOpenFilter === 'closed' && !deleted) return false;
+
+      if (callDirectionFilter !== 'all' && direction !== callDirectionFilter) return false;
+
+      if (callQuickFilter === 'missed') {
+        const isMissed = status === 'missed' || (!call?.answeredAt && status === 'completed' && direction === 'incoming');
+        if (!isMissed) return false;
+      }
+
+      if (callQuickFilter === 'voicemail' && !hasVoicemail(call)) return false;
+
+      if (callQuickFilter === 'unresponded') {
+        if (direction !== 'incoming') return false;
+        const relatedConversation = conversations.find((conversation) =>
+          String(conversation?.participants?.[0] || '') === participant,
+        );
+        if (!relatedConversation) return false;
+        const latestTs = toTime(relatedConversation?.lastActivityAt || relatedConversation?.updatedAt);
+        const latestActivityId = String(relatedConversation?.lastActivityId || '');
+        const callId = String(call?.id || call?.callId || '');
+        const unresolved = latestTs <= callTs || latestActivityId === callId;
+        if (!unresolved) return false;
+      }
+
+      if (callPhoneSearch && !participant.includes(callPhoneSearch.trim())) return false;
+
+      if (callDateFrom) {
+        const fromTs = toTime(`${callDateFrom}T00:00:00`);
+        if (callTs < fromTs) return false;
+      }
+
+      if (callDateTo) {
+        const toTs = toTime(`${callDateTo}T23:59:59`);
+        if (callTs > toTs) return false;
+      }
+
+      return true;
+    });
+  }, [
+    callsList,
+    conversations,
+    callOpenFilter,
+    callQuickFilter,
+    callDirectionFilter,
+    callPhoneSearch,
+    callDateFrom,
+    callDateTo,
+  ]);
+
+  // Handler for tab change
+  const handleTabChange = useCallback((tab) => {
+    setSelectedTab(tab);
+    setSelectedConversation(null);
+    setSelectedCallId(null);
+    setTimeline([]);
+    if (tab === 'calls') {
+      loadCalls();
+    }
+  }, [loadCalls]);
+
   return (
     <div className="flex h-[calc(100vh-64px)] overflow-hidden">
       <div className="w-95 shrink-0 border-r border-gray-200 flex flex-col bg-white">
-        <div className="shrink-0 p-4 border-b border-gray-200">
-          <button 
-            type="button" 
-            onClick={() => setShowNewConversationInput(true)}
-            className="w-full rounded-lg bg-indigo-600 text-white px-3 py-2 text-sm font-medium hover:bg-indigo-700 mb-3"
-          >
-            + New Conversation
-          </button>
+        {/* Header with Tabs and Icons */}
+        <div className="shrink-0 border-b border-gray-200 p-4">
+          <div className="flex items-center justify-between gap-4 mb-3">
+            {/* Tabs */}
+            <div className="flex items-center gap-0">
+              <button
+                type="button"
+                onClick={() => handleTabChange('chats')}
+                className={`px-4 py-2 text-sm font-semibold transition ${
+                  selectedTab === 'chats'
+                    ? 'text-gray-900 border-b-2 border-indigo-600'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                Chats
+              </button>
+              <button
+                type="button"
+                onClick={() => handleTabChange('calls')}
+                className={`px-4 py-2 text-sm font-semibold transition ${
+                  selectedTab === 'calls'
+                    ? 'text-gray-900 border-b-2 border-indigo-600'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                Calls
+              </button>
+            </div>
 
-          {showNewConversationInput ? (
-            <div className="mb-3 p-3 border border-indigo-200 rounded-lg bg-indigo-50">
-              <input
-                type="text"
-                value={newConversationPhone}
-                onChange={(e) => setNewConversationPhone(e.target.value)}
-                onKeyDown={handleNewConversationKeyDown}
-                placeholder="Enter phone number"
-                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
-                autoFocus
-              />
-              <div className="mt-2 flex gap-2">
+            {/* Icons */}
+            <div className="flex items-center gap-2">
+              <button type="button" className="rounded-md p-2 hover:bg-gray-100 text-gray-600" aria-label="Phone">
+                📞
+              </button>
+              <button 
+                type="button" 
+                onClick={() => setShowNewConversationInput(true)}
+                className="rounded-md p-2 hover:bg-gray-100 text-gray-600" 
+                aria-label="New message"
+              >
+                💬
+              </button>
+            </div>
+          </div>
+
+          {/* Filter Pills Section */}
+          {selectedTab === 'chats' ? (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <FilterDropdown
+                  value={chatOpenFilter}
+                  onChange={setChatOpenFilter}
+                  options={[
+                    { value: 'open', label: 'Open' },
+                    { value: 'closed', label: 'Closed' },
+                    { value: 'all', label: 'All' },
+                  ]}
+                />
                 <button
                   type="button"
-                  onClick={handleNewConversationSubmit}
-                  className="flex-1 text-xs font-medium px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                  onClick={() => {
+                    setChatOpenFilter('open');
+                    setChatQuickFilter((prev) => (prev === 'unread' ? '' : 'unread'));
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    chatQuickFilter === 'unread' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'
+                  }`}
                 >
-                  Start
+                  Unread
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    setShowNewConversationInput(false);
-                    setNewConversationPhone('');
+                    setChatOpenFilter('open');
+                    setChatQuickFilter((prev) => (prev === 'unresponded' ? '' : 'unresponded'));
                   }}
-                  className="flex-1 text-xs font-medium px-3 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-100"
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    chatQuickFilter === 'unresponded' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'
+                  }`}
                 >
-                  Cancel
+                  Unresponded
                 </button>
               </div>
+              <button
+                type="button"
+                onClick={() => setShowChatAdvancedFilters((prev) => !prev)}
+                className="text-xs text-gray-500 hover:text-gray-700"
+              >
+                ≡ Filter
+              </button>
+              {showChatAdvancedFilters ? (
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 grid grid-cols-1 gap-2">
+                  <input
+                    type="date"
+                    value={chatDateFrom}
+                    onChange={(event) => setChatDateFrom(event.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    placeholder="From"
+                  />
+                  <input
+                    type="date"
+                    value={chatDateTo}
+                    onChange={(event) => setChatDateTo(event.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    placeholder="To"
+                  />
+                  <input
+                    type="text"
+                    value={chatPhoneSearch}
+                    onChange={(event) => setChatPhoneSearch(event.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    placeholder="Search phone"
+                  />
+                </div>
+              ) : null}
             </div>
-          ) : null}
-
-          <div className="flex items-center gap-2">
-            <button type="button" className="rounded-lg bg-indigo-50 text-indigo-700 px-3 py-1.5 text-sm font-medium">Chats</button>
-            <button type="button" className="rounded-lg text-gray-500 hover:bg-gray-100 px-3 py-1.5 text-sm font-medium">Calls</button>
-          </div>
-          <div className="mt-3 flex items-center gap-2">
-            <button type="button" className="rounded-full bg-indigo-100 text-indigo-700 px-3 py-1 text-xs font-medium">Open</button>
-            <button type="button" className="rounded-full bg-gray-100 text-gray-600 px-3 py-1 text-xs font-medium">Unread</button>
-            <button type="button" className="rounded-full bg-gray-100 text-gray-600 px-3 py-1 text-xs font-medium">Unresponded</button>
-          </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <FilterDropdown
+                  value={callOpenFilter}
+                  onChange={setCallOpenFilter}
+                  options={[
+                    { value: 'open', label: 'Open' },
+                    { value: 'closed', label: 'Closed' },
+                    { value: 'all', label: 'All' },
+                  ]}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCallOpenFilter('open');
+                    setCallQuickFilter((prev) => (prev === 'missed' ? '' : 'missed'));
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    callQuickFilter === 'missed' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  Missed
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCallOpenFilter('open');
+                    setCallQuickFilter((prev) => (prev === 'voicemail' ? '' : 'voicemail'));
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    callQuickFilter === 'voicemail' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  Voicemail
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCallOpenFilter('open');
+                    setCallQuickFilter((prev) => (prev === 'unresponded' ? '' : 'unresponded'));
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    callQuickFilter === 'unresponded' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  Unresponded
+                </button>
+                <FilterDropdown
+                  value={callDirectionFilter}
+                  onChange={setCallDirectionFilter}
+                  options={[
+                    { value: 'all', label: 'Direction', icon: '↕' },
+                    { value: 'incoming', label: 'Incoming', icon: '↙' },
+                    { value: 'outgoing', label: 'Outgoing', icon: '↗' },
+                  ]}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCallAdvancedFilters((prev) => !prev)}
+                className="text-xs text-gray-500 hover:text-gray-700"
+              >
+                ≡ Filter
+              </button>
+              {showCallAdvancedFilters ? (
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 grid grid-cols-1 gap-2">
+                  <input
+                    type="date"
+                    value={callDateFrom}
+                    onChange={(event) => setCallDateFrom(event.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    placeholder="From"
+                  />
+                  <input
+                    type="date"
+                    value={callDateTo}
+                    onChange={(event) => setCallDateTo(event.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    placeholder="To"
+                  />
+                  <input
+                    type="text"
+                    value={callPhoneSearch}
+                    onChange={(event) => setCallPhoneSearch(event.target.value)}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                    placeholder="Search phone"
+                  />
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto">
-            {loading ? (
-              <p className="px-4 py-6 text-sm text-gray-500">Loading conversations...</p>
-            ) : visibleConversations.length === 0 ? (
-              <p className="px-4 py-6 text-sm text-gray-500">No conversations found.</p>
-            ) : (
-              <ul>
-                {visibleConversations.map((conversation) => {
-                  const participant = conversation?.participants?.[0];
-                  const contactName = getContactName(participant);
-                  const active = selectedConversation?.id === conversation.id;
-                  const isUnread = unreadConversations.has(conversation.id);
+            {selectedTab === 'chats' ? (
+              <>
+                {/* New Conversation Input */}
+                {showNewConversationInput ? (
+                  <div className="sticky top-0 bg-white border-b border-gray-100 p-3 z-10">
+                    <input
+                      type="text"
+                      value={newConversationPhone}
+                      onChange={(e) => setNewConversationPhone(e.target.value)}
+                      onKeyDown={handleNewConversationKeyDown}
+                      placeholder="Send a message..."
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
+                      autoFocus
+                    />
+                  </div>
+                ) : null}
 
-                  return (
-                    <li key={conversation.id}>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedConversation(conversation)}
-                        className={`w-full border-b border-gray-100 px-4 py-3 text-left transition ${
-                          active ? 'bg-indigo-50' : 'bg-white hover:bg-gray-50'
-                        }`}
-                      >
-                        <div className="flex items-start gap-3">
-                          <div className="mt-0.5 relative">
-                            <PersonIconSmall />
-                            {isUnread ? (
-                              <div className="absolute top-0 right-0 h-2.5 w-2.5 rounded-full bg-blue-500 border border-white" />
-                            ) : null}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className={`truncate text-sm ${isUnread ? 'font-bold text-gray-900' : 'font-semibold text-gray-900'}`}>
-                                {contactName || participant}
-                              </p>
-                              <span className="shrink-0 text-xs text-gray-500">{formatTimestamp(conversation.lastMessageAt)}</span>
+                {/* Conversations List */}
+                {loading ? (
+                  <p className="px-4 py-6 text-sm text-gray-500">Loading conversations...</p>
+                ) : filteredConversations.length === 0 ? (
+                  <p className="px-4 py-6 text-sm text-gray-500">No conversations found.</p>
+                ) : (
+                  <ul>
+                    {filteredConversations.map((conversation) => {
+                      const participant = conversation?.participants?.[0];
+                      const contactName = getContactName(participant);
+                      const active = selectedConversation?.id === conversation.id;
+                      const isUnread = unreadConversations.has(conversation.id);
+
+                      return (
+                        <li key={conversation.id}>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedConversation(conversation)}
+                            className={`w-full border-b border-gray-100 px-4 py-3 text-left transition ${
+                              active ? 'bg-indigo-50' : 'bg-white hover:bg-gray-50'
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className="mt-0.5 relative">
+                                <PersonIconSmall />
+                                {isUnread ? (
+                                  <div className="absolute top-0 right-0 h-2.5 w-2.5 rounded-full bg-blue-500 border border-white" />
+                                ) : null}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className={`truncate text-sm ${isUnread ? 'font-bold text-gray-900' : 'font-semibold text-gray-900'}`}>
+                                    {contactName || participant}
+                                  </p>
+                                  <span className="shrink-0 text-xs text-gray-500">{formatTimestamp(conversation.lastMessageAt)}</span>
+                                </div>
+                                <p className="mt-1 truncate text-sm text-gray-500">{getConversationListPreview(conversation)}</p>
+                              </div>
                             </div>
-                            <p className="mt-1 truncate text-sm text-gray-500">{getConversationListPreview(conversation)}</p>
-                          </div>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+
+                {nextPageToken ? (
+                  <div className="border-t border-slate-200 p-3">
+                    <button type="button" onClick={handleLoadMore} className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100">
+                      Load more
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <>
+                {/* Calls List */}
+                {callsLoading ? (
+                  <p className="px-4 py-6 text-sm text-gray-500">Loading calls...</p>
+                ) : filteredCalls.length === 0 ? (
+                  <p className="px-4 py-6 text-sm text-gray-500">No calls found.</p>
+                ) : (
+                  <ul>
+                    {filteredCalls.map((call) => {
+                      const participant = call.participant || call.source?.phoneNumber || call.from || 'Unknown';
+                      const contactName = getContactName(participant);
+                      const active = selectedCallId === call.id;
+                      const callEndedText = call.direction === 'incoming' ? '↙ Call ended' : '↗ Call ended';
+
+                      return (
+                        <li key={call.id}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedCallId(call.id);
+                              setSelectedConversation(null);
+                              setTimeline([]);
+                            }}
+                            className={`w-full border-b border-gray-100 px-4 py-3 text-left transition ${
+                              active ? 'bg-indigo-50' : 'bg-white hover:bg-gray-50'
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <PersonIconSmall />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div>
+                                    <p className="text-sm font-semibold text-gray-900">{contactName || participant}</p>
+                                    <div className="mt-0.5 flex items-center gap-2">
+                                      <p className="text-xs text-gray-500">{callEndedText}</p>
+                                      <span className="h-5 w-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[9px] font-semibold">
+                                        SU
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <span className="shrink-0 text-xs text-gray-500">{formatTimestamp(call.createdAt)}</span>
+                                </div>
+                                <p className="mt-1 text-xs text-gray-500">You answered · {formatDuration(call.duration)}</p>
+                              </div>
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </>
             )}
 
-            {nextPageToken ? (
-              <div className="border-t border-slate-200 p-3">
-                <button type="button" onClick={handleLoadMore} className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100">
-                  Load more
-                </button>
-              </div>
-            ) : null}
-          {error ? <div className="m-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
+            {error ? <div className="m-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
         </div>
       </div>
 
       <div className="flex-1 flex flex-col bg-gray-50 min-w-0 relative">
         <div className="shrink-0 border-b border-gray-200 bg-white px-6 py-3">
-          {selectedConversation ? (
+          {selectedTab === 'chats' && selectedConversation ? (
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-3 min-w-0">
                 <PersonIcon />
@@ -1066,75 +1681,195 @@ export default function AIMessagingCommandCenter() {
                 ) : null}
               </div>
             </div>
+          ) : selectedTab === 'calls' && selectedCallId ? (
+            <div className="flex items-center gap-3">
+              <PersonIcon />
+              <div>
+                <p className="text-lg font-semibold text-gray-900">Call Details</p>
+                <p className="text-sm text-gray-500">{callsList.find((call) => call.id === selectedCallId)?.participant || selectedCallId}</p>
+              </div>
+            </div>
           ) : (
-            <p className="text-sm text-gray-500">Choose a conversation</p>
+            <p className="text-sm text-gray-500">Choose a {selectedTab === 'chats' ? 'conversation' : 'call'}</p>
           )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          <div className="space-y-4">
-            {detailLoading ? (
-              <p className="text-sm text-gray-500">Loading timeline...</p>
-            ) : !selectedConversation ? (
-              <p className="text-sm text-gray-500">Choose a conversation to view details.</p>
-            ) : timeline.length === 0 ? (
-              <p className="text-sm text-gray-500">No timeline items yet.</p>
-            ) : (
-              timeline.map((item, index) => {
-                const nextItem = timeline[index + 1];
-                const showOutgoingAvatar = item.type === 'message' && item.direction === 'outgoing' && (!nextItem || nextItem.direction !== 'outgoing');
-                return (
-                  <TimelineItem
-                    key={`${item.type}-${item.id}`}
-                    item={item}
-                    participantLabel={selectedParticipant}
-                    showOutgoingAvatar={showOutgoingAvatar}
-                  />
-                );
-              })
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+          {selectedTab === 'chats' ? (
+            <div className="space-y-4">
+              {detailLoading ? (
+                <p className="text-sm text-gray-500">Loading timeline...</p>
+              ) : !selectedConversation ? (
+                <p className="text-sm text-gray-500">Choose a conversation to view details.</p>
+              ) : timeline.length === 0 ? (
+                <p className="text-sm text-gray-500">No timeline items yet.</p>
+              ) : (
+                <>
+                  {timeline.map((item, index) => {
+                    const nextItem = timeline[index + 1];
+                    const showOutgoingAvatar = item.type === 'message' && item.direction === 'outgoing' && (!nextItem || nextItem.direction !== 'outgoing');
+                    return (
+                      <TimelineItem
+                        key={`${item.type}-${item.id}`}
+                        item={item}
+                        participantLabel={selectedParticipant}
+                        showOutgoingAvatar={showOutgoingAvatar}
+                      />
+                    );
+                  })}
+                  <div className="text-center py-4">
+                    <p className="text-sm text-gray-400">You're all caught up</p>
+                  </div>
+                </>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {!selectedCallId ? (
+                <p className="text-sm text-gray-500">Choose a call to view details.</p>
+              ) : callsList.find((c) => c.id === selectedCallId) ? (
+                <CallCard item={callsList.find((c) => c.id === selectedCallId)} />
+              ) : (
+                <p className="text-sm text-gray-500">Call details not available.</p>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="shrink-0 border-t border-gray-200 bg-white p-4">
-            {composerToast ? (
-              <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                {composerToast}
-              </div>
+            {selectedTab === 'chats' && selectedConversation ? (
+              <>
+                {composerToast ? (
+                  <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {composerToast}
+                  </div>
+                ) : null}
+                <textarea
+                  value={composerText}
+                  onChange={(e) => setComposerText(e.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  rows={2}
+                  placeholder="Write a message..."
+                  className="w-full resize-y rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <input
+                  ref={attachmentInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={handleAttachmentSelected}
+                />
+                {(selectedAttachment || scheduledAt) ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {selectedAttachment ? (
+                      <span className="rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">
+                        📎 {selectedAttachment.name}
+                      </span>
+                    ) : null}
+                    {scheduledAt ? (
+                      <span className="rounded-full bg-amber-50 px-2 py-1 text-xs text-amber-700">
+                        ⏱ Scheduled
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+                {showSchedulePicker ? (
+                  <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                    <label className="mb-1 block text-xs font-medium text-amber-800">Schedule send time</label>
+                    <input
+                      type="datetime-local"
+                      value={scheduleDraftAt}
+                      onChange={(event) => setScheduleDraftAt(event.target.value)}
+                      className="w-full rounded-md border border-amber-200 bg-white px-2 py-1.5 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-amber-200"
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleApplySchedule}
+                        className="rounded-md bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowSchedulePicker(false)}
+                        className="rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                      >
+                        Cancel
+                      </button>
+                      {scheduledAt ? (
+                        <button
+                          type="button"
+                          onClick={handleClearSchedule}
+                          className="rounded-md border border-red-300 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                        >
+                          Clear
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-1 text-gray-500">
+                    <button
+                      type="button"
+                      onClick={handleSparkleDraft}
+                      className="rounded-md p-2 hover:bg-gray-100 disabled:opacity-50"
+                      aria-label="Sparkle"
+                      disabled={composerDrafting}
+                    >
+                      ✦
+                    </button>
+                    <button type="button" onClick={handleQuickEdit} className="rounded-md p-2 hover:bg-gray-100" aria-label="Edit">✎</button>
+                    <button type="button" onClick={handleAttachmentClick} className="rounded-md p-2 hover:bg-gray-100" aria-label="Attachment">📎</button>
+                    <div className="relative" ref={emojiPickerRef}>
+                      <button
+                        type="button"
+                        onClick={handleEmojiToggle}
+                        className="rounded-md p-2 hover:bg-gray-100"
+                        aria-label="Emoji"
+                      >
+                        ☺
+                      </button>
+                      {showEmojiPicker ? (
+                        <div className="absolute bottom-11 left-0 z-40 w-72 rounded-xl border border-gray-200 bg-white p-3 shadow-xl">
+                          <p className="mb-2 text-xs font-medium text-gray-500">Emoji picker</p>
+                          <div className="grid grid-cols-8 gap-1">
+                            {BASIC_EMOJIS.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => handleEmojiInsert(emoji)}
+                                className="rounded-md p-1 text-xl hover:bg-gray-100"
+                                aria-label={`Insert ${emoji}`}
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 text-gray-500">
+                    <button type="button" onClick={handleTimerToggle} className="rounded-md p-2 hover:bg-gray-100" aria-label="Timer">⏱</button>
+                    <button
+                      type="button"
+                      onClick={handleSendMessage}
+                      disabled={sending || !composerText.trim() || !selectedConversation}
+                      className="rounded-md p-2 text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      aria-label="Send"
+                    >
+                      ➤
+                    </button>
+                  </div>
+                </div>
+              </>
             ) : null}
-            <textarea
-              value={composerText}
-              onChange={(e) => setComposerText(e.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              rows={2}
-              placeholder="Write a message..."
-              className="w-full resize-y rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-900 outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-1 text-gray-500">
-                <button type="button" className="rounded-md p-2 hover:bg-gray-100" aria-label="Sparkle">✦</button>
-                <button type="button" className="rounded-md p-2 hover:bg-gray-100" aria-label="Edit">✎</button>
-                <button type="button" className="rounded-md p-2 hover:bg-gray-100" aria-label="Attachment">📎</button>
-                <button type="button" className="rounded-md p-2 hover:bg-gray-100" aria-label="Emoji">☺</button>
-              </div>
-              <div className="flex items-center gap-1 text-gray-500">
-                <button type="button" className="rounded-md p-2 hover:bg-gray-100" aria-label="Timer">⏱</button>
-                <button
-                  type="button"
-                  onClick={handleSendMessage}
-                  disabled={sending || !composerText.trim() || !selectedConversation}
-                  className="rounded-md p-2 text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                  aria-label="Send"
-                >
-                  ➤
-                </button>
-              </div>
-            </div>
         </div>
 
         {/* Info Panel */}
-        {showInfoPanel && selectedConversation ? (
+        {showInfoPanel && selectedTab === 'chats' && selectedConversation ? (
           <div className="absolute right-0 top-0 h-full w-64 bg-white border-l border-gray-200 shadow-lg flex flex-col">
             <div className="shrink-0 border-b border-gray-200 px-4 py-3 flex items-center justify-between">
               <h2 className="font-semibold text-gray-900">Contact Info</h2>
