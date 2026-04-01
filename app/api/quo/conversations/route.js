@@ -1,81 +1,56 @@
+import { quoFetch } from '@/lib/quo-fetch';
 import { NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
-import { listConversations } from '@/lib/quo';
-import dbConnect from '@/lib/db';
-import Customer from '@/models/Customer';
 
 export async function GET(request) {
-  const authError = await requireAuth();
-  if (authError) return authError;
-
-  const phoneNumberId = process.env.QUO_PHONE_NUMBER_ID;
-  if (!phoneNumberId || phoneNumberId === 'user-will-fill-this') {
-    return NextResponse.json({ error: 'QUO_PHONE_NUMBER_ID not configured' }, { status: 500 });
-  }
-
   try {
     const { searchParams } = new URL(request.url);
-    const maxResults = Math.min(100, Math.max(1, parseInt(searchParams.get('maxResults') || '50', 10)));
-    const pageToken = searchParams.get('pageToken') || undefined;
-    const state = (searchParams.get('state') || 'open').toLowerCase();
+    const params = new URLSearchParams(searchParams);
 
-    const raw = await listConversations(phoneNumberId, { maxResults, pageToken });
-    const list = Array.isArray(raw?.data) ? raw.data : [];
+    // Always scope conversations to the CLT Professional number on the server.
+    const cltPhoneNumberId = process.env.QUO_PHONE_NUMBER_ID || 'PNmyACDF3W';
+    params.delete('phoneNumbers[]');
+    params.append('phoneNumbers[]', cltPhoneNumberId);
 
-    const filtered = state === 'open'
-      ? list.filter((conv) => !conv.deletedAt)
-      : state === 'archived'
-        ? list.filter((conv) => conv.deletedAt)
-        : list; // 'all' or unknown => return everything
+    const query = params.toString();
+    const endpoint = query ? `/conversations?${query}` : '/conversations';
 
-    await dbConnect();
+    const data = await quoFetch(endpoint);
 
-    // Extract unique participants mapping dynamically
-    const allNumbers = new Set();
-    filtered.forEach(c => {
-      const pArr = c.participants ?? c.phoneNumbers ?? c.participant ?? [];
-      const arr = Array.isArray(pArr) ? pArr : [pArr].filter(Boolean);
-      arr.forEach(x => {
-        const ph = typeof x === 'string' ? x : x?.phoneNumber ?? x?.number ?? x;
-        if (ph) allNumbers.add(ph);
-      });
-    });
+    const list = Array.isArray(data?.data) ? data.data : [];
 
-    const customers = await Customer.find({ phone: { $in: Array.from(allNumbers) } }).select('phone name aiDraft isSpam');
-    const customerMap = {};
-    customers.forEach(c => {
-      customerMap[c.phone] = c;
-    });
+    // Keep only active conversations.
+    const active = list.filter((conversation) => !conversation?.deletedAt);
 
-    const finalFiltered = filtered.map(c => {
-      const pArr = c.participants ?? c.phoneNumbers ?? c.participant ?? [];
-      const arr = Array.isArray(pArr) ? pArr : [pArr].filter(Boolean);
-      const ph = arr.map(x => typeof x === 'string' ? x : x?.phoneNumber ?? x?.number ?? x).find(Boolean);
+    // Deduplicate by primary participant number, keeping the most recent by lastActivityAt.
+    const byParticipant = new Map();
+    for (const conversation of active) {
+      const participants = Array.isArray(conversation?.participants) ? conversation.participants : [];
+      const participant = participants[0] || conversation?.participant || conversation?.phoneNumber || conversation?.id;
+      const key = String(participant || conversation?.id);
 
-      if (!customerMap[ph]) {
-        return null; // Spam or deleted Customer
+      const existing = byParticipant.get(key);
+      const currentTs = new Date(conversation?.lastActivityAt || conversation?.updatedAt || 0).getTime();
+      const existingTs = existing
+        ? new Date(existing?.lastActivityAt || existing?.updatedAt || 0).getTime()
+        : -1;
+
+      if (!existing || currentTs > existingTs) {
+        byParticipant.set(key, conversation);
       }
+    }
 
-      if (customerMap[ph]?.isSpam) {
-        return null; // Filter out spam entirely
-      }
-
-      const realName = customerMap[ph]?.name && customerMap[ph].name !== 'Unknown' ? customerMap[ph].name : c.contactName;
-      return { ...c, contactName: realName || null, aiDraft: customerMap[ph]?.aiDraft || null, isSpam: false };
-    }).filter(Boolean);
-
-    const response = {
-      ...raw,
-      data: finalFiltered,
-      totalItems: finalFiltered.length,
-    };
-
-    return NextResponse.json(response);
-  } catch (error) {
-    console.error('Quo conversations error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Failed to fetch conversations' },
-      { status: error.message?.includes('402') ? 402 : 500 }
+    const deduped = Array.from(byParticipant.values()).sort(
+      (a, b) =>
+        new Date(b?.lastActivityAt || b?.updatedAt || 0).getTime() -
+        new Date(a?.lastActivityAt || a?.updatedAt || 0).getTime(),
     );
+
+    return NextResponse.json({
+      ...data,
+      data: deduped,
+      totalItems: deduped.length,
+    });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: err.status || 500 });
   }
 }

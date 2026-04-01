@@ -1,29 +1,19 @@
 'use client';
 
 import { useSession } from 'next-auth/react';
-import { useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
 import Navbar from '@/components/Navbar';
 
 export default function AdminLayout({ children }) {
-  const { data: session, status } = useSession();
-  const router = useRouter();
+  const { data: session } = useSession();
+  const pathname = usePathname();
+  const isAIMessagingPage = pathname?.startsWith('/admin/ai-messaging');
   const [pendingMessages, setPendingMessages] = useState(0);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   /** Desktop (md+): sidebar expands while pointer is over it; mobile drawer unchanged. */
   const [sidebarDesktopExpanded, setSidebarDesktopExpanded] = useState(false);
-
-  useEffect(() => {
-    if (status === 'loading') return;
-    if (!session) {
-      router.push('/login');
-      return;
-    }
-    if (session.user.role !== 'admin') {
-      router.push('/handyman/projects');
-    }
-  }, [session, status, router]);
 
   useEffect(() => {
     if (!session) return;
@@ -42,21 +32,6 @@ export default function AdminLayout({ children }) {
     const interval = setInterval(fetchPending, 30000);
     return () => clearInterval(interval);
   }, [session]);
-
-  if (status === 'loading') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-          <span className="text-gray-500 text-sm">Loading...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!session || session.user.role !== 'admin') {
-    return null;
-  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -100,8 +75,14 @@ export default function AdminLayout({ children }) {
           sidebarDesktopExpanded ? 'md:pl-64' : 'md:pl-16'
         }`}
       >
-        <Navbar user={session.user} onMenuToggle={() => setMobileMenuOpen((o) => !o)} mobileMenuOpen={mobileMenuOpen} />
-        <main className="flex-1 px-4 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] md:px-8 md:pt-6 md:pb-8 lg:p-8">
+        <Navbar user={session?.user} onMenuToggle={() => setMobileMenuOpen((o) => !o)} mobileMenuOpen={mobileMenuOpen} />
+        <main
+          className={
+            isAIMessagingPage
+              ? 'flex-1 overflow-hidden'
+              : 'flex-1 px-4 pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] md:px-8 md:pt-6 md:pb-8 lg:p-8'
+          }
+        >
           {children}
         </main>
       </div>

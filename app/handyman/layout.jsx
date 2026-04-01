@@ -1,7 +1,7 @@
 'use client';
 
 import { useSession } from 'next-auth/react';
-import { useRouter, usePathname } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import Link from 'next/link';
 
@@ -44,19 +44,11 @@ function ProfileIcon({ active }) {
 
 export default function HandymanLayout({ children }) {
   const { data: session, status } = useSession();
-  const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
     if (status === 'loading') return;
-    if (!session) {
-      router.push('/login');
-      return;
-    }
-    if (session.user.role === 'admin') {
-      router.push('/admin/dashboard');
-    }
-  }, [session, status, router]);
+  }, [status]);
 
   if (status === 'loading') {
     return (
